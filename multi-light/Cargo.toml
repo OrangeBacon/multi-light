@@ -1,0 +1,6 @@
+[package]
+name = "multi-light"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
