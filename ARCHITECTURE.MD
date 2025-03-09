@@ -1,6 +1,6 @@
 References
 - Old Style PList file format:
-  https://macromates.com/manual/en/appendix#property-list-format
+  https://web.archive.org/web/20250226095826/https://macromates.com/manual/en/appendix#property-list-format
 - VSCode theme files:
   https://code.visualstudio.com/api/extension-guides/color-theme
   https://arnav.tech/creating-and-publishing-visual-studio-code-color-themes
