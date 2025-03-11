@@ -3,9 +3,9 @@
 //! plist vs YAML etc.
 
 mod json;
+mod yaml;
 
-use core::{fmt::Debug, marker::PhantomData};
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, fmt::Debug, marker::PhantomData, path::PathBuf};
 
 use serde::{Deserialize, de::Visitor};
 
