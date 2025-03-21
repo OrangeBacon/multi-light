@@ -13,16 +13,16 @@ impl Config {
         let file_name = file_name.into();
 
         let yaml = yaml_rust2::YamlLoader::load_from_str(content.as_ref()).map_err(|err| {
-            Error::YAMLScanError {
-                err,
+            Error::YAMLError {
+                err: err.to_string(),
                 file_name: file_name.clone(),
             }
         })?;
 
         // only accept 1 document within the file, error if there are multiple
         if yaml.len() != 1 {
-            return Err(Error::YAMLDocumentCount {
-                count: yaml.len(),
+            return Err(Error::YAMLError {
+                err: format!("Expected 1 document, got {}", yaml.len()),
                 file_name: file_name.clone(),
             });
         }
@@ -77,7 +77,8 @@ fn yaml_visitor(yaml: yaml_rust2::Yaml, file_name: &Path) -> Result<ConfigTree<(
                         yaml_rust2::Yaml::String(k) => k,
                         yaml_rust2::Yaml::Boolean(k) => k.to_string(),
                         _ => {
-                            return Err(Error::YAMLComplexKey {
+                            return Err(Error::YAMLError {
+                                err: String::from("Unexpected Complex Key in map"),
                                 file_name: file_name.to_path_buf(),
                             });
                         }
@@ -95,10 +96,12 @@ fn yaml_visitor(yaml: yaml_rust2::Yaml, file_name: &Path) -> Result<ConfigTree<(
             id: Default::default(),
         }),
         // not fully implemented within yaml_rust2 according to its documentation?
-        yaml_rust2::Yaml::Alias(_) => Err(Error::YAMLAlias {
+        yaml_rust2::Yaml::Alias(_) => Err(Error::YAMLError {
+            err: String::from("yaml_rust2 alias not fully implemented"),
             file_name: file_name.to_path_buf(),
         }),
-        yaml_rust2::Yaml::BadValue => Err(Error::YAMLInvalid {
+        yaml_rust2::Yaml::BadValue => Err(Error::YAMLError {
+            err: String::from("Bad value found"),
             file_name: file_name.to_path_buf(),
         }),
     }
