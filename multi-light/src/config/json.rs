@@ -1,4 +1,4 @@
-use std::{borrow::Cow, path::PathBuf, str::CharIndices, sync::LazyLock};
+use std::{borrow::Cow, collections::HashMap, path::PathBuf, str::CharIndices, sync::LazyLock};
 
 use onig::{Captures, Regex};
 
@@ -34,11 +34,13 @@ impl Config {
     ) -> Result<Self, Error> {
         let file_name = file_name.into();
 
-        let mut parser = JSONParser::new(file_name, source.as_ref());
+        let parser = JSONParser::new(file_name, source.as_ref());
 
         parser.parse()
     }
 }
+
+type Tree = ConfigTree<ConfigNodeID>;
 
 /// State used while parsing a single JSON file
 struct JSONParser<'a> {
@@ -53,24 +55,15 @@ struct JSONParser<'a> {
     /// current column number
     column: usize,
 
-    /// stack of partially parsed trees
-    object_stack: Vec<ConfigTree<ConfigNodeID>>,
-
     /// stack of which state the parser is in
-    state_stack: Vec<JSONState>,
-
-    /// The currently in use tree
-    current_object: Option<ConfigTree<ConfigNodeID>>,
-
-    /// The currently in use state
-    current_state: JSONState,
+    stack: Vec<JSONState>,
 
     /// List of all stored locations
     location: Vec<Location>,
 }
 
 /// All token types within a JSON file
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum JSONTokenKind {
     String,
     LeftSquare,
@@ -86,23 +79,25 @@ enum JSONTokenKind {
 }
 
 /// Current state of the JSON parser
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum JSONState {
-    Root,
-    Dict,
-    DictComma,
-    DictNoClose,
-    Array,
-    ArrayComma,
-    ArrayNoClose,
+    /// Within a dictionary / map
+    Dict {
+        id: ConfigNodeID,
+        value: HashMap<String, Tree>,
+        key: String,
+    },
+
+    /// within an array
+    Array { id: ConfigNodeID, value: Vec<Tree> },
 }
 
 /// A single token parsed from a JSON file
 #[derive(Debug)]
-struct JSONToken<'a> {
+struct JSONToken {
     /// String value of the token, string tokens will have any escapes processed
     /// and the result stored here.
-    value: Option<Cow<'a, str>>,
+    value: String,
 
     /// What sort of token this is
     kind: JSONTokenKind,
@@ -124,16 +119,13 @@ impl<'a> JSONParser<'a> {
             chars: source.char_indices(),
             line: 1,
             column: 1,
-            object_stack: vec![],
-            state_stack: vec![],
-            current_object: None,
-            current_state: JSONState::Root,
+            stack: vec![],
             location: vec![],
         }
     }
 
     /// Get the next full token from the source
-    fn next_token(&mut self) -> Result<Option<JSONToken<'a>>, Error> {
+    fn next_token(&mut self) -> Result<Option<JSONToken>, Error> {
         // skip whitespace
         let mut current = None;
         let mut current_str = self.chars.as_str();
@@ -151,11 +143,11 @@ impl<'a> JSONParser<'a> {
         let Some(current) = current else {
             return Ok(None);
         };
-        let token_loc = self.location();
+        let token_loc = self.current_location();
 
         let single = |str: &'static str, kind| {
             Ok(Some(JSONToken {
-                value: Some(Cow::Borrowed(str)),
+                value: String::from(str),
                 kind,
                 byte_offset: token_loc.byte_number,
                 line: token_loc.line_number,
@@ -172,7 +164,7 @@ impl<'a> JSONParser<'a> {
                 }
             }
             Ok(Some(JSONToken {
-                value: Some(Cow::Borrowed(str)),
+                value: String::from(str),
                 kind,
                 byte_offset: token_loc.byte_number,
                 line: token_loc.line_number,
@@ -217,16 +209,16 @@ impl<'a> JSONParser<'a> {
                 let value = self.json_string_value(value)?;
 
                 Ok(Some(JSONToken {
-                    value: Some(Cow::Owned(value.to_string())),
+                    value: value.to_string(),
                     kind: JSONTokenKind::String,
                     byte_offset: token_loc.byte_number,
                     line: token_loc.line_number,
                     column: token_loc.column_number,
                 }))
             }
-            _ => {
+            start => {
                 // must be a number as none of the other tokens match
-                let start_offset = self.chars.offset();
+                let start_offset = self.chars.offset() - start.len_utf8();
 
                 while self
                     .advance_if(|ch| ".1234567890eE+-".contains(ch))
@@ -236,7 +228,7 @@ impl<'a> JSONParser<'a> {
                 let value = &current_str[..(self.chars.offset() - start_offset)];
 
                 Ok(Some(JSONToken {
-                    value: Some(Cow::Owned(value.to_string())),
+                    value: value.to_string(),
                     kind: JSONTokenKind::Number,
                     byte_offset: token_loc.byte_number,
                     line: token_loc.line_number,
@@ -268,12 +260,21 @@ impl<'a> JSONParser<'a> {
     }
 
     /// Get the current location
-    fn location(&self) -> Location {
+    fn current_location(&self) -> Location {
         Location {
             line_number: self.line,
             column_number: self.column,
             byte_number: self.chars.offset(),
         }
+    }
+
+    /// Get a node ID for the given location
+    fn node_id(&mut self, location: Location) -> ConfigNodeID {
+        let id = self.location.len();
+
+        self.location.push(location);
+
+        ConfigNodeID(id)
     }
 
     /// Create an error message
@@ -344,21 +345,297 @@ impl<'a> JSONParser<'a> {
 
     /// Parse the input into a tree.  Only ever outputs a tree with debug info as
     /// serde_json can likely do better for the without option.
-    fn parse(&mut self) -> Result<Config, Error> {
+    fn parse(mut self) -> Result<Config, Error> {
+        // This parser is written differently from that used in vscode, however
+        // hopefully not differently on its output.  Vscode uses significantly
+        // more states and uses the following loop to read tokens from the inside
+        // of an array or dictionary, whereas this parser puts more focus onto the
+        // code running within each state.  The reason for this change is that
+        // vscode can push a value into an array or store it in a dictionary and
+        // then still mutate it in a different method and i cannot see a way to
+        // copy their exact method without making everything in the tree
+        // Rc<Refcell> or Arc<Mutex> which seems rather complicated compared with
+        // just re-organising the code while porting it from javascript to rust.
+        // would it have been better to completely ignore the original parser and
+        // just write recursive-descent?  could have been easier at least but i guess
+        // this works better if you have thousands of nested items?
         while let Some(tok) = self.next_token()? {
-            println!("{tok:?}");
+            match self.stack.pop() {
+                None => self.parse_root(tok)?,
+                Some(JSONState::Dict { id, value, .. }) => self.parse_dict(tok, id, value)?,
+                Some(JSONState::Array { id, value }) => self.parse_array(tok, id, value)?,
+            }
         }
 
-        todo!()
+        if self.stack.len() != 1 {
+            return Err(self.error("unclosed constructs"));
+        }
+
+        // will always succeed due to check above
+        let tree = self.stack.pop().map(JSONState::into_tree).unwrap();
+
+        Ok(Config::Debug {
+            tree,
+            location: self.location,
+            file_name: self.file_name,
+        })
+    }
+
+    /// JSON Root state parsing (nothing else has been parsed yet)
+    fn parse_root(&mut self, tok: JSONToken) -> Result<(), Error> {
+        if !self.stack.is_empty() {
+            return Err(self.error("too many constructs in root"));
+        }
+
+        if tok.kind == JSONTokenKind::LeftCurly {
+            let id = self.node_id(tok.location());
+            self.stack.push(JSONState::Dict {
+                id,
+                value: HashMap::new(),
+                key: String::new(),
+            });
+
+            Ok(())
+        } else if tok.kind == JSONTokenKind::LeftSquare {
+            let id = self.node_id(tok.location());
+            self.stack.push(JSONState::Array { id, value: vec![] });
+
+            Ok(())
+        } else {
+            Err(self.error("unexpected token in root"))
+        }
+    }
+
+    /// Parse a dictionary / map
+    fn parse_dict(
+        &mut self,
+        mut tok: JSONToken,
+        id: ConfigNodeID,
+        mut dict: HashMap<String, Tree>,
+    ) -> Result<(), Error> {
+        if tok.kind == JSONTokenKind::RightCurly {
+            // the dictionary is finished, so put the constructed value into the
+            // tree segment lower in the stack
+            self.consume_state(JSONState::Dict {
+                id,
+                value: dict,
+                key: String::new(),
+            });
+
+            return Ok(());
+        }
+
+        // we are not at the end of the dict, so parse the next value
+        if !dict.is_empty() {
+            if tok.kind != JSONTokenKind::Comma {
+                // we had a previous value, so we need a comma before the next one
+                return Err(self.error("expected , or }"));
+            }
+
+            // get the token after the comma which should be the key of the dict
+            match self.next_token()? {
+                Some(t) => tok = t,
+                None => return Ok(()),
+            };
+        }
+
+        if tok.kind != JSONTokenKind::String {
+            return Err(self.error("unexpected token in dict"));
+        }
+
+        let key = tok.value;
+
+        match self.next_token()? {
+            Some(JSONToken {
+                kind: JSONTokenKind::Colon,
+                ..
+            }) => {}
+            Some(_) => return Err(self.error("expected colon")),
+            None => return Ok(()),
+        };
+
+        let Some(tok) = self.next_token()? else {
+            return Err(self.error("expected value"));
+        };
+
+        let value = match tok.kind {
+            JSONTokenKind::String
+            | JSONTokenKind::Null
+            | JSONTokenKind::True
+            | JSONTokenKind::False
+            | JSONTokenKind::Number => self.token_to_tree(tok),
+            JSONTokenKind::LeftSquare => {
+                // push the current dict so we can get back into it.
+                self.stack.push(JSONState::Dict {
+                    id,
+                    value: dict,
+                    key,
+                });
+                let array_id = self.node_id(tok.location());
+
+                // push the array so we can enter the array parser
+                self.stack.push(JSONState::Array {
+                    id: array_id,
+                    value: vec![],
+                });
+
+                return Ok(());
+            }
+            JSONTokenKind::LeftCurly => {
+                // push the current dict so we can get back into it.
+                self.stack.push(JSONState::Dict {
+                    id,
+                    value: dict,
+                    key,
+                });
+                let array_id = self.node_id(tok.location());
+
+                // push the dict so we can enter the dict parser
+                self.stack.push(JSONState::Dict {
+                    id: array_id,
+                    value: HashMap::new(),
+                    key: String::new(),
+                });
+
+                return Ok(());
+            }
+            _ => return Err(self.error("unexpected token in dict")),
+        };
+
+        dict.insert(key, value);
+
+        // continue with the dict in the next iteration of the main parse loop
+        self.stack.push(JSONState::Dict {
+            id,
+            value: dict,
+            key: String::new(),
+        });
+        Ok(())
+    }
+
+    /// Parse a dictionary / map
+    fn parse_array(
+        &mut self,
+        mut tok: JSONToken,
+        id: ConfigNodeID,
+        mut arr: Vec<Tree>,
+    ) -> Result<(), Error> {
+        if tok.kind == JSONTokenKind::RightSquare {
+            // the dictionary is finished, so put the constructed value into the
+            // tree segment lower in the stack
+            self.consume_state(JSONState::Array { id, value: arr });
+
+            return Ok(());
+        }
+
+        // we are not at the end of the dict, so parse the next value
+        if !arr.is_empty() {
+            if tok.kind != JSONTokenKind::Comma {
+                // we had a previous value, so we need a comma before the next one
+                return Err(self.error("expected , or ]"));
+            }
+
+            // get the token after the comma which should be the key of the dict
+            match self.next_token()? {
+                Some(t) => tok = t,
+                None => return Ok(()),
+            };
+        }
+
+        let value = match tok.kind {
+            JSONTokenKind::String
+            | JSONTokenKind::Null
+            | JSONTokenKind::True
+            | JSONTokenKind::False
+            | JSONTokenKind::Number => self.token_to_tree(tok),
+            JSONTokenKind::LeftSquare => {
+                // push the current array so we can get back into it.
+                self.stack.push(JSONState::Array { id, value: arr });
+                let array_id = self.node_id(tok.location());
+
+                // push the array so we can enter the array parser
+                self.stack.push(JSONState::Array {
+                    id: array_id,
+                    value: vec![],
+                });
+
+                return Ok(());
+            }
+            JSONTokenKind::LeftCurly => {
+                // push the current array so we can get back into it.
+                self.stack.push(JSONState::Array { id, value: arr });
+                let array_id = self.node_id(tok.location());
+
+                // push the dict so we can enter the dict parser
+                self.stack.push(JSONState::Dict {
+                    id: array_id,
+                    value: HashMap::new(),
+                    key: String::new(),
+                });
+
+                return Ok(());
+            }
+            _ => return Err(self.error("unexpected token in dict")),
+        };
+
+        arr.push(value);
+
+        // continue with the array in the next iteration of the main parse loop
+        self.stack.push(JSONState::Array { id, value: arr });
+        Ok(())
+    }
+
+    /// take a completed array/dict and put it into the right place in the tree
+    fn consume_state(&mut self, state: JSONState) {
+        match self.stack.last_mut() {
+            Some(JSONState::Array { value, .. }) => value.push(state.into_tree()),
+            Some(JSONState::Dict { value, key, .. }) => {
+                value.insert(std::mem::take(key), state.into_tree());
+            }
+            None => self.stack.push(state),
+        }
+    }
+
+    /// convert a token into its config tree value
+    fn token_to_tree(&mut self, tok: JSONToken) -> Tree {
+        let id = self.node_id(tok.location());
+
+        match tok.kind {
+            JSONTokenKind::String => ConfigTree::String {
+                id,
+                value: tok.value,
+            },
+            JSONTokenKind::True => ConfigTree::Bool { id, value: true },
+            JSONTokenKind::False => ConfigTree::Bool { id, value: false },
+            JSONTokenKind::Number => ConfigTree::String {
+                id,
+                value: tok.value,
+            },
+
+            // either null or a default value for something that cannot be converted
+            // into a tree as this is only called within other match statements
+            // that already check for this
+            _ => ConfigTree::Null { id },
+        }
     }
 }
 
-impl JSONToken<'_> {
+impl JSONToken {
     fn location(&self) -> Location {
         Location {
             line_number: self.line,
             column_number: self.column,
             byte_number: self.byte_offset,
+        }
+    }
+}
+
+impl JSONState {
+    /// Convert this state into a tree node
+    fn into_tree(self) -> Tree {
+        match self {
+            JSONState::Dict { id, value, .. } => ConfigTree::Object { id, value },
+            JSONState::Array { id, value } => ConfigTree::Array { id, value },
         }
     }
 }

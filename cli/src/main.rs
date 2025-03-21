@@ -3,12 +3,12 @@ fn main() {
         "text.json",
         r#"[{
         "1": {
-          "name": "punctuation.definition\".tag"
+          "name": "punctuation.definition.tag"
         },
         "2": {
           "name": "entity.name.tag"
         }
-      }]"#,
+      }, 5.4, {}, ["a", "b"]]"#,
     )
     .unwrap();
 
