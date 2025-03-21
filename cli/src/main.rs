@@ -1,16 +1,14 @@
 fn main() {
-    let file = multi_light::Config::from_yaml(
+    let file = multi_light::Config::from_json_debug(
         "text.json",
-        r#"%YAML 1.2
----
-name: C
-file_extensions: [c, h]
-scope: source.c
-
-contexts:
-  main:
-    - match: \b(if|else|for|while)\b
-      scope: keyword.control.c"#,
+        r#"[{
+        "1": {
+          "name": "punctuation.definition\".tag"
+        },
+        "2": {
+          "name": "entity.name.tag"
+        }
+      }]"#,
     )
     .unwrap();
 
