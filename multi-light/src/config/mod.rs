@@ -10,7 +10,7 @@ use std::{collections::HashMap, fmt::Debug, marker::PhantomData, path::PathBuf};
 use serde::{Deserialize, de::Visitor};
 
 /// Document representation common to JSON/plist/XML/YAML
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Config {
     /// Version of the config that includes location debug information
     Debug {
@@ -47,7 +47,7 @@ pub struct ConfigNodeID(pub usize);
 /// Raw tree data within a parsed document.  The generic parameter is used for
 /// the NodeID, to allow setting it to a zero-size type if debug info is not
 /// needed, therefore making the structure smaller.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ConfigTree<T> {
     Null {
         id: T,
@@ -71,7 +71,7 @@ pub enum ConfigTree<T> {
 }
 
 /// Source location for each item within a config file
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Location {
     /// line number at the start of the item (1 indexed)
     pub line_number: usize,
@@ -89,6 +89,19 @@ impl Config {
         match self {
             Config::Debug { location, .. } => location.get(node.0).copied(),
             Config::NonDebug { .. } => None,
+        }
+    }
+
+    /// Remove all associated location information from the config
+    pub fn remove_location(self) -> Self {
+        match self {
+            Config::Debug {
+                tree, file_name, ..
+            } => Config::NonDebug {
+                tree: tree.remove_id(),
+                file_name,
+            },
+            Config::NonDebug { .. } => self,
         }
     }
 }
@@ -118,7 +131,10 @@ impl<'de, T: Default> Visitor<'de> for ConfigTreeVisitor<T> {
     where
         E: serde::de::Error,
     {
-        self.visit_string(v.to_string())
+        Ok(ConfigTree::Bool {
+            id: Default::default(),
+            value: v,
+        })
     }
 
     fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
@@ -252,6 +268,28 @@ impl<T: Debug> Debug for ConfigTree<T> {
                 .field("id", id)
                 .field("value", value)
                 .finish(),
+        }
+    }
+}
+
+impl<T> ConfigTree<T> {
+    /// Remove location info from the tree
+    pub fn remove_id(self) -> ConfigTree<()> {
+        match self {
+            ConfigTree::Null { .. } => ConfigTree::Null { id: () },
+            ConfigTree::Bool { value, .. } => ConfigTree::Bool { id: (), value },
+            ConfigTree::String { value, .. } => ConfigTree::String { id: (), value },
+            ConfigTree::Array { value, .. } => ConfigTree::Array {
+                id: (),
+                value: value.into_iter().map(ConfigTree::remove_id).collect(),
+            },
+            ConfigTree::Object { value, .. } => ConfigTree::Object {
+                id: (),
+                value: value
+                    .into_iter()
+                    .map(|(key, value)| (key, ConfigTree::remove_id(value)))
+                    .collect(),
+            },
         }
     }
 }

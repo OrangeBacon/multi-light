@@ -83,13 +83,22 @@ enum JSONTokenKind {
 enum JSONState {
     /// Within a dictionary / map
     Dict {
+        /// location that this dict was opened
         id: ConfigNodeID,
+
+        /// current value of the dict
         value: HashMap<String, Tree>,
+
+        /// if a state higher in the stack is closed, it should be inserted into
+        /// the dict with this key
         key: String,
     },
 
     /// within an array
     Array { id: ConfigNodeID, value: Vec<Tree> },
+
+    /// Root state once something has finished parsing
+    Root { tree: Tree },
 }
 
 /// A single token parsed from a JSON file
@@ -131,11 +140,11 @@ impl<'a> JSONParser<'a> {
         let mut current_str = self.chars.as_str();
 
         while let Some(ch) = self.advance() {
-            current = Some(ch);
             if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
                 current_str = self.chars.as_str();
                 continue;
             } else {
+                current = Some(ch);
                 break;
             }
         }
@@ -225,7 +234,9 @@ impl<'a> JSONParser<'a> {
                     .is_some()
                 {}
 
-                let value = &current_str[..(self.chars.offset() - start_offset)];
+                let value = &current_str
+                    .get(..(self.chars.offset() - start_offset))
+                    .unwrap_or("");
 
                 Ok(Some(JSONToken {
                     value: value.to_string(),
@@ -361,9 +372,13 @@ impl<'a> JSONParser<'a> {
         // this works better if you have thousands of nested items?
         while let Some(tok) = self.next_token()? {
             match self.stack.pop() {
-                None => self.parse_root(tok)?,
                 Some(JSONState::Dict { id, value, .. }) => self.parse_dict(tok, id, value)?,
-                Some(JSONState::Array { id, value }) => self.parse_array(tok, id, value)?,
+                Some(JSONState::Array { id, value, .. }) => self.parse_array(tok, id, value)?,
+                Some(root) => {
+                    self.stack.push(root);
+                    self.parse_root(tok)?;
+                }
+                _ => self.parse_root(tok)?,
             }
         }
 
@@ -372,10 +387,14 @@ impl<'a> JSONParser<'a> {
         }
 
         // will always succeed due to check above
-        let tree = self.stack.pop().map(JSONState::into_tree).unwrap();
+        let tree = self.stack.pop().unwrap();
+
+        if !matches!(tree, JSONState::Root { .. }) {
+            return Err(self.error("unclosed constructs"));
+        }
 
         Ok(Config::Debug {
-            tree,
+            tree: tree.into_tree(),
             location: self.location,
             file_name: self.file_name,
         })
@@ -435,7 +454,7 @@ impl<'a> JSONParser<'a> {
             // get the token after the comma which should be the key of the dict
             match self.next_token()? {
                 Some(t) => tok = t,
-                None => return Ok(()),
+                None => return Err(self.error("expected dict key")),
             };
         }
 
@@ -450,8 +469,7 @@ impl<'a> JSONParser<'a> {
                 kind: JSONTokenKind::Colon,
                 ..
             }) => {}
-            Some(_) => return Err(self.error("expected colon")),
-            None => return Ok(()),
+            _ => return Err(self.error("expected colon")),
         };
 
         let Some(tok) = self.next_token()? else {
@@ -521,24 +539,24 @@ impl<'a> JSONParser<'a> {
         mut arr: Vec<Tree>,
     ) -> Result<(), Error> {
         if tok.kind == JSONTokenKind::RightSquare {
-            // the dictionary is finished, so put the constructed value into the
+            // the array is finished, so put the constructed value into the
             // tree segment lower in the stack
             self.consume_state(JSONState::Array { id, value: arr });
 
             return Ok(());
         }
 
-        // we are not at the end of the dict, so parse the next value
+        // we are not at the end of the array, so parse the next value
         if !arr.is_empty() {
             if tok.kind != JSONTokenKind::Comma {
                 // we had a previous value, so we need a comma before the next one
                 return Err(self.error("expected , or ]"));
             }
 
-            // get the token after the comma which should be the key of the dict
+            // get the token after the comma which should be the next value
             match self.next_token()? {
                 Some(t) => tok = t,
-                None => return Ok(()),
+                None => return Err(self.error("expected array value")),
             };
         }
 
@@ -575,7 +593,7 @@ impl<'a> JSONParser<'a> {
 
                 return Ok(());
             }
-            _ => return Err(self.error("unexpected token in dict")),
+            _ => return Err(self.error("unexpected token in array")),
         };
 
         arr.push(value);
@@ -592,7 +610,9 @@ impl<'a> JSONParser<'a> {
             Some(JSONState::Dict { value, key, .. }) => {
                 value.insert(std::mem::take(key), state.into_tree());
             }
-            None => self.stack.push(state),
+            Some(_) | None => self.stack.push(JSONState::Root {
+                tree: state.into_tree(),
+            }),
         }
     }
 
@@ -609,7 +629,7 @@ impl<'a> JSONParser<'a> {
             JSONTokenKind::False => ConfigTree::Bool { id, value: false },
             JSONTokenKind::Number => ConfigTree::String {
                 id,
-                value: tok.value,
+                value: tok.value.parse::<f64>().unwrap_or(f64::NAN).to_string(),
             },
 
             // either null or a default value for something that cannot be converted
@@ -635,7 +655,8 @@ impl JSONState {
     fn into_tree(self) -> Tree {
         match self {
             JSONState::Dict { id, value, .. } => ConfigTree::Object { id, value },
-            JSONState::Array { id, value } => ConfigTree::Array { id, value },
+            JSONState::Array { id, value, .. } => ConfigTree::Array { id, value },
+            JSONState::Root { tree } => tree,
         }
     }
 }
@@ -661,4 +682,119 @@ fn replace_all<E>(
 
     new.push_str(&input[last_match..]);
     Ok(new)
+}
+
+#[cfg(test)]
+mod test {
+    use crate::Config;
+
+    #[track_caller]
+    fn is_valid(json: &str) {
+        let name = format!("{}", std::panic::Location::caller());
+
+        assert_eq!(
+            Config::from_json(name.clone(), json).unwrap(),
+            Config::from_json_debug(name.clone(), json)
+                .unwrap()
+                .remove_location()
+        );
+    }
+
+    #[track_caller]
+    fn is_invalid(json: &str) {
+        let name = format!("{}", std::panic::Location::caller());
+
+        assert!(Config::from_json_debug(name.clone(), json).is_err())
+    }
+
+    // test cases from https://github.com/microsoft/vscode-textmate/blob/v9.2.0/src/tests/json.test.ts
+
+    #[test]
+    fn json_invalid_body() {
+        is_invalid("{}[]");
+        is_invalid("*");
+    }
+
+    #[test]
+    fn json_trailing_whitespace() {
+        is_valid("{}\n\n");
+    }
+
+    #[test]
+    fn json_objects() {
+        is_valid("{}");
+        is_valid(r#"{"key": "value"}"#);
+        is_valid(r#"{"key1": true, "key2": 3, "key3": [null], "key4": { "nested": {}}}"#);
+        is_valid(r#"{"constructor": true }"#);
+
+        is_invalid("{");
+        is_invalid("{3:3}");
+        is_invalid("{\'key\': 3}");
+        is_invalid("{\"key\" 3}");
+        is_invalid("{\"key\":3 \"key2\": 4}");
+        is_invalid("{\"key\":42, }");
+        is_invalid("{\"key:42");
+    }
+
+    #[test]
+    fn json_arrays() {
+        is_valid("[]");
+        is_valid("[1, 2]");
+        is_valid("[1, \"string\", false, {}, [null]]");
+
+        is_invalid("[");
+        is_invalid("[,]");
+        is_invalid("[1 2]");
+        is_invalid("[true false]");
+        is_invalid("[1, ]");
+        is_invalid("[[]");
+        is_invalid("[\"something\"");
+        is_invalid("[magic]");
+    }
+
+    #[test]
+    fn json_strings() {
+        is_valid("[\"string\"]");
+        is_valid("[\"\\\"\\\\\\/\\b\\f\\n\\r\\t\\u1234\\u12AB\"]");
+        is_valid("[\"\\\\\"]");
+
+        is_invalid("[\"");
+        is_invalid("[\"]");
+        is_invalid("[\"\\z\"]");
+        is_invalid("[\"\\u\"]");
+        is_invalid("[\"\\u123\"]");
+        is_invalid("[\"\\u123Z\"]");
+        is_invalid("[\'string\']");
+    }
+
+    #[test]
+    fn json_numbers() {
+        is_valid("[0, -1, 186.1, 0.123, -1.583e+4, 1.583E-4, 5e8]");
+
+        // is_invalid('[+1]');
+        // is_invalid('[01]');
+        // is_invalid('[1.]');
+        // is_invalid('[1.1+3]');
+        // is_invalid('[1.4e]');
+        // is_invalid('[-A]');
+    }
+
+    #[test]
+    fn json_misc() {
+        is_valid("{}");
+        is_valid("[null]");
+        is_valid("{\"a\":true}");
+        is_valid("{\n\t\"key\" : {\n\t\"key2\": 42\n\t}\n}");
+        is_valid("{\"key\":[{\"key2\":42}]}");
+        is_valid("{\n\t\n}");
+        is_valid("{\n\"first\":true\n\n}");
+        is_valid("{\n\"key\":32,\n\n\"key2\":45}");
+        is_valid("{\"a\": 1,\n\n\"d\": 2}");
+        is_valid("{\"a\": 1, \"a\": 2}");
+        is_valid("{\"a\": { \"a\": 2, \"a\": 3}}");
+        is_valid("[{ \"a\": 2, \"a\": 3}]");
+        is_valid("{\"key1\":\"first string\", \"key2\":[\"second string\"]}");
+
+        is_invalid("{\n\"key\":32,\nerror\n}");
+    }
 }
