@@ -4,6 +4,7 @@
 
 mod json;
 mod yaml;
+mod toml;
 
 use std::{collections::HashMap, fmt::Debug, marker::PhantomData, path::PathBuf};
 

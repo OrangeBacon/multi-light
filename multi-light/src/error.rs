@@ -15,6 +15,10 @@ pub enum Error {
         err: String,
         file_name: PathBuf,
     },
+    SerdeToml {
+        err: Box<toml::de::Error>,
+        file_name: PathBuf,
+    },
 }
 
 impl Display for Error {
@@ -33,6 +37,11 @@ impl Display for Error {
             Error::YAMLError { err, file_name } => writeln!(
                 f,
                 "Error while parsing YAML file `{}`: {err}",
+                file_name.display()
+            ),
+            Error::SerdeToml { err, file_name } => writeln!(
+                f,
+                "Error while parsing TOML file `{}`: {err}",
                 file_name.display()
             ),
         }
