@@ -15,7 +15,7 @@ impl Config {
             file_name: file_name.clone(),
         })?;
 
-        Ok(Self::NonDebug {
+        Ok(Self {
             tree: toml,
             file_name,
         })

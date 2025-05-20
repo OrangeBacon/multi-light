@@ -32,37 +32,24 @@ impl Config {
 
         let tree = yaml_visitor(yaml, &file_name)?;
 
-        Ok(Self::NonDebug { tree, file_name })
+        Ok(Self { tree, file_name })
     }
 }
 
 /// Convert yaml_rust2 representation into `ConfigTree<()>`.  Unfortunately
 /// this cannot just be a serde deserialize as yaml_rust2 doesn't use serde.
-fn yaml_visitor(yaml: yaml_rust2::Yaml, file_name: &Path) -> Result<ConfigTree<()>, Error> {
+fn yaml_visitor(yaml: yaml_rust2::Yaml, file_name: &Path) -> Result<ConfigTree, Error> {
     match yaml {
-        yaml_rust2::Yaml::Real(value) => Ok(ConfigTree::String {
-            id: Default::default(),
-            value,
-        }),
-        yaml_rust2::Yaml::Integer(value) => Ok(ConfigTree::String {
-            id: Default::default(),
-            value: value.to_string(),
-        }),
-        yaml_rust2::Yaml::String(value) => Ok(ConfigTree::String {
-            id: Default::default(),
-            value,
-        }),
-        yaml_rust2::Yaml::Boolean(value) => Ok(ConfigTree::Bool {
-            id: Default::default(),
-            value,
-        }),
-        yaml_rust2::Yaml::Array(value) => Ok(ConfigTree::Array {
-            id: Default::default(),
-            value: value
+        yaml_rust2::Yaml::Real(value) => Ok(ConfigTree::String(value)),
+        yaml_rust2::Yaml::Integer(value) => Ok(ConfigTree::String(value.to_string())),
+        yaml_rust2::Yaml::String(value) => Ok(ConfigTree::String(value)),
+        yaml_rust2::Yaml::Boolean(value) => Ok(ConfigTree::Bool(value)),
+        yaml_rust2::Yaml::Array(value) => Ok(ConfigTree::Array(
+            value
                 .into_iter()
                 .map(|v| yaml_visitor(v, file_name))
                 .collect::<Result<_, _>>()?,
-        }),
+        )),
         yaml_rust2::Yaml::Hash(value) => {
             let value = value
                 .into_iter()
@@ -87,14 +74,9 @@ fn yaml_visitor(yaml: yaml_rust2::Yaml, file_name: &Path) -> Result<ConfigTree<(
                 })
                 .collect::<Result<_, _>>()?;
 
-            Ok(ConfigTree::Object {
-                id: Default::default(),
-                value,
-            })
+            Ok(ConfigTree::Object(value))
         }
-        yaml_rust2::Yaml::Null => Ok(ConfigTree::Null {
-            id: Default::default(),
-        }),
+        yaml_rust2::Yaml::Null => Ok(ConfigTree::Null),
         // not fully implemented within yaml_rust2 according to its documentation?
         yaml_rust2::Yaml::Alias(_) => Err(Error::YAMLError {
             err: String::from("yaml_rust2 alias not fully implemented"),

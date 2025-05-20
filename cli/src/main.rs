@@ -1,5 +1,5 @@
 fn main() {
-    let file = multi_light::Config::from_json_debug(
+    let file = multi_light::Config::from_json(
         "text.json",
         r#"[{
         "1": {
