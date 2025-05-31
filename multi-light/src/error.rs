@@ -11,6 +11,10 @@ pub enum Error {
         err: String,
         file_name: PathBuf,
     },
+    PlistError {
+        err: String,
+        file_name: PathBuf,
+    },
     YAMLError {
         err: String,
         file_name: PathBuf,
@@ -32,6 +36,11 @@ impl Display for Error {
             Error::JSONError { err, file_name } => writeln!(
                 f,
                 "Error while parsing JSON file `{}`: {err}",
+                file_name.display()
+            ),
+            Error::PlistError { err, file_name } => writeln!(
+                f,
+                "Error while parsing plist file `{}`: {err}",
                 file_name.display()
             ),
             Error::YAMLError { err, file_name } => writeln!(

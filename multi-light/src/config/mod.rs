@@ -3,6 +3,7 @@
 //! plist vs YAML etc.
 
 mod json;
+mod plist;
 mod toml;
 mod yaml;
 
