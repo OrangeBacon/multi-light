@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     str::CharIndices,
     sync::LazyLock,
@@ -68,15 +69,113 @@ impl<'a> PlistParser<'a> {
             self.chars.next();
         }
 
+        self.event_to_value_root()
+    }
+
+    /// Convert the event stream from the parser to a config tree
+    fn event_to_value_root(&mut self) -> Result<ConfigTree, Error> {
+        let mut val = ConfigTree::Null;
+
         loop {
-            let ev = self.parse_value()?;
-            if ev == ParserEvent::Eof {
-                break;
+            match self.parse_value()? {
+                ParserEvent::Value(tree) => val = tree,
+                ParserEvent::EnterDict => val = self.event_to_value_dict()?,
+                ParserEvent::EnterArray => val = self.event_to_value_array()?,
+
+                ParserEvent::Key(_) => {
+                    return Err(Error::PlistError {
+                        err: "unexpected <key>".into(),
+                        file_name: self.file_name.to_path_buf(),
+                    });
+                }
+                ParserEvent::CloseArray => {
+                    return Err(Error::PlistError {
+                        err: "unexpected </array>".into(),
+                        file_name: self.file_name.to_path_buf(),
+                    });
+                }
+                ParserEvent::CloseDict => {
+                    return Err(Error::PlistError {
+                        err: "unexpected </dict>".into(),
+                        file_name: self.file_name.to_path_buf(),
+                    });
+                }
+                ParserEvent::Eof => break,
             }
-            println!("{ev:?}");
         }
 
-        todo!()
+        Ok(val)
+    }
+
+    /// Convert the event stream from the parser to a config dictionary
+    fn event_to_value_dict(&mut self) -> Result<ConfigTree, Error> {
+        let mut val = HashMap::new();
+        let mut key = None;
+
+        loop {
+            let next = match self.parse_value()? {
+                ParserEvent::Value(tree) => tree,
+                ParserEvent::EnterDict => self.event_to_value_dict()?,
+                ParserEvent::EnterArray => self.event_to_value_array()?,
+
+                ParserEvent::Key(s) => {
+                    if key.is_some() {
+                        return Err(Error::PlistError {
+                            err: "too many <key>".into(),
+                            file_name: self.file_name.to_path_buf(),
+                        });
+                    }
+                    key = Some(s);
+                    continue;
+                }
+                ParserEvent::CloseArray => {
+                    return Err(Error::PlistError {
+                        err: "unexpected </array>".into(),
+                        file_name: self.file_name.to_path_buf(),
+                    });
+                }
+                ParserEvent::CloseDict | ParserEvent::Eof => break,
+            };
+
+            val.insert(
+                key.take().ok_or_else(|| Error::PlistError {
+                    err: "missing <key>".into(),
+                    file_name: self.file_name.to_path_buf(),
+                })?,
+                next,
+            );
+        }
+
+        Ok(ConfigTree::Object(val))
+    }
+
+    /// Convert the event stream from the parser to a config array
+    fn event_to_value_array(&mut self) -> Result<ConfigTree, Error> {
+        let mut val = vec![];
+
+        loop {
+            match self.parse_value()? {
+                ParserEvent::Value(tree) => val.push(tree),
+                ParserEvent::EnterDict => val.push(self.event_to_value_dict()?),
+                ParserEvent::EnterArray => val.push(self.event_to_value_array()?),
+
+                ParserEvent::Key(_) => {
+                    return Err(Error::PlistError {
+                        err: "unexpected <key>".into(),
+                        file_name: self.file_name.to_path_buf(),
+                    });
+                }
+                ParserEvent::CloseDict => {
+                    return Err(Error::PlistError {
+                        err: "unexpected </dict>".into(),
+                        file_name: self.file_name.to_path_buf(),
+                    });
+                }
+                ParserEvent::CloseArray | ParserEvent::Eof => break,
+            }
+        }
+
+        Ok(ConfigTree::Array(val))
     }
 
     /// Accept any single value from the input
