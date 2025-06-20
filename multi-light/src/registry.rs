@@ -1,29 +1,46 @@
+use std::collections::HashMap;
+
+use crate::{Config, Error};
+
 /// Storage for all data required to syntax highlight a piece of source code
-#[derive(Debug, Clone, Copy)]
-pub struct Registry<F> {
+pub struct Registry {
     /// function to use to read a file referenced from a source file
-    callback: Option<F>,
+    callback: Option<Box<dyn Fn()>>,
+
+    themes: HashMap<String, Config>,
 }
 
-impl<F> Registry<F> {
+impl Registry {
     /// Create a new registry, containing no syntaxes or grammars
     pub fn new() -> Self {
-        Registry { callback: None }
+        Registry {
+            callback: None,
+            themes: HashMap::new(),
+        }
     }
 }
 
-impl<F> Default for Registry<F> {
+impl Default for Registry {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<F, E> Registry<F>
-where
-    F: FnMut(&str) -> Result<(), E>,
-{
-    // fn read_file(f: fn(&str) -> Result<impl HighlightInput>) {} // function for reading a required dependency file
-    // fn add(name: &str, input: impl HighlightInput) -> Result<()> {} // add a file to the registry
+impl Registry {
+    // fn read_file(f: fn(&str) -> Result<&str>) {} // function for reading a required dependency file
+
+    /// Add a  new file to the registry
+    pub fn add(&mut self, name: &str, input: &str) -> Result<(), Error> {
+        let cfg = Config::from_plist(name, input)
+            .or_else(|_| Config::from_json(name, input))
+            .or_else(|_| Config::from_toml(name, input))
+            .or_else(|_| Config::from_yaml(name, input))?;
+
+        self.themes.insert(name.to_string(), cfg);
+
+        Ok(())
+    }
+
     // // Get the theme for a given name (or default if there isn't one already).  Allows for more complex construction of themes, i.e.
     // // if you want to merge them, read them, modify them based on code, etc. (do the same for grammars)
     // fn theme(name: &str) -> Theme<'a> {}

@@ -25,8 +25,6 @@ File Data (cargo features!)
 - tmLanguage
 - sublime-theme
 - sublime-syntax
-- vscode-theme (might reference other file, how do i ask the user for the next file?)
-- tree-sitter theme
 
 Input
 - create a trait that allows for:
